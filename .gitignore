@@ -1,0 +1,5 @@
+# Actual knowledge base data (not part of the blueprint)
+records.json
+wiki/
+*.backup
+.env
