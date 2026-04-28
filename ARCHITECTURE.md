@@ -66,13 +66,68 @@ New document arrives
 
 ---
 
-## Query Routing Strategy
+## Query Routing: AI Agent Decision Algorithm
 
-| Query Type | Route | Reason |
-|------------|-------|--------|
-| Exact keyword, named concept | System B first | Fast, zero cost |
-| Complex question, comparison | System A | Embedding match is stronger |
-| Exploratory / uncertain | Both | Full coverage |
+When a user asks a question, follow this algorithm to decide where to search:
+
+### Step 1 — Classify the query
+
+| Signal in the question | Route |
+|------------------------|-------|
+| Exact name, acronym, or title ("what is X", "tell me about Y") | System B first |
+| Comparison or relationship ("how does X differ from Y") | System A |
+| Vague / exploratory ("something about financial risk") | System A |
+| "Latest", "recent", "when did" | Neither — use web search |
+| Personal notes, past decisions, architecture choices | System B |
+
+### Step 2 — Execute the search
+
+**If System B first:**
+1. Scan `$KB_BASE/wiki/{relevant_topic}/_summary.md` to see if the topic exists
+2. If a matching file is listed, read it directly
+3. If not found → fall through to System A
+
+**If System A:**
+1. Embed the query using the same model (`nomic-embed-text-v2-moe:latest`)
+2. Run cosine similarity against the relevant topic's `records.json`
+3. Take top 3–5 results above a score threshold (recommend: > 0.75)
+
+**If both:**
+1. Run System B lookup first (it's instant)
+2. Run System A in parallel or immediately after
+3. Merge results — prefer System B for definitions, System A for context
+
+### Step 3 — Handle no results
+
+```
+System B: no match found
+    └─ Fall through to System A automatically
+
+System A: no results above threshold
+    └─ Widen search to all topics (not just the assumed topic)
+    └─ If still nothing → tell the user: "Not in the knowledge base.
+       Do you want me to search the web and add this to the KB?"
+```
+
+### Step 4 — After answering, consider updating the KB
+
+If you found the answer via web search (not KB), ask yourself:
+- Is this knowledge stable and reusable?
+- Would future queries benefit from having this stored?
+
+If yes → ingest into System A (and optionally promote to System B via migration_helper).
+
+---
+
+## Query Routing Examples
+
+| User question | Decision | Reason |
+|---------------|----------|--------|
+| "What is the RIC rule?" | System B | Named regulation — likely in wiki |
+| "How does VT ETF compare to QQQ?" | System A | Comparative, semantic |
+| "What did I decide about the DB upgrade?" | System B | Personal decision log |
+| "Find anything related to inflation hedging" | System A | Exploratory, semantic |
+| "Summarize what we know about Ethereum" | Both | Named topic + may have depth in A |
 
 ---
 
