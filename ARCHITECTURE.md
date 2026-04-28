@@ -159,4 +159,5 @@ The tool converts `records.json` entries into individual `.md` files and updates
 |-------------|---------------|
 | < 5,000 | NumPy full scan — simple, no dependencies |
 | 5,000–50,000 | sqlite-vec with HNSW index |
-| > 50,000 | Qdrant or similar vector DB service |
+| > 50,000 | Add cross-encoder reranker (e.g. `ms-marco-MiniLM`) after vector search: retrieve top-20, rerank to top-5 |
+| > 100,000 | Qdrant or similar vector DB service |
