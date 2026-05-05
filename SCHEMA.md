@@ -43,10 +43,20 @@ System A runs entirely on Raw — it does not depend on the Wiki layer.
 
 ## 2. Write Permissions
 
+### Agent Roles
+
+| Role | Description |
+|------|-------------|
+| **Primary agent** | The main AI agent. Responsible for ingestion, crystallization, and wiki maintenance. In a multi-agent setup, this is the orchestrator. |
+| **Sub-agent** | Any agent spawned by the primary agent for a specific task. Inherits the primary agent's write permissions within the scope of its task. |
+| **Read-only agent** | An agent that queries the KB but must not write to wiki files or modify records. Useful for agents that only need to answer questions. |
+
+### Permission Table
+
 | Resource | Writers | Restriction |
 |----------|---------|-------------|
 | `records.json` | ingestion script | all agents read-only |
-| `wiki/*.md` (incl. `concepts/`, `entities/`) | primary agent, Claude Code | read-only agents cannot write |
+| `wiki/*.md` (incl. `concepts/`, `entities/`) | primary agent, sub-agents, Claude Code | read-only agents cannot write |
 | `log.md` | all agents | append only — existing lines must not be modified |
 | `SCHEMA.md` | human owner | no agent may modify |
 | `_summary.md` | human owner | LLM must not overwrite — human-authored |
@@ -128,16 +138,18 @@ status: active | stale | redirected
 - Yes → `entities/`
 - No → `concepts/`
 
-### Memory Dreaming Integration (if applicable)
+### Memory Dreaming Integration (optional — OpenClaw users)
 
-If your agent system includes a Memory Dreaming subsystem, keep its metrics separate from wiki frontmatter:
+If you use [OpenClaw Dreaming](https://docs.openclaw.ai/concepts/dreaming), which automatically memorizes conversation information and tracks how often each memory is recalled, keep its metrics separate from wiki frontmatter:
 
 | Metric | Where it lives | Why |
 |--------|---------------|-----|
 | `confidence` | wiki frontmatter | content quality — how many sources support this |
-| `recalls` (retrieval frequency) | dreaming subsystem | usage metric — how often this memory was accessed |
+| `recalls` (retrieval frequency) | OpenClaw Dreaming | usage metric — how often this memory was accessed |
 
 These are orthogonal: high confidence + low recalls = solid but rarely needed knowledge (normal). Mixing them in the same metadata makes lint decisions ambiguous.
+
+If you don't use OpenClaw, ignore this section — the wiki frontmatter spec works independently.
 
 ---
 

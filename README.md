@@ -99,6 +99,47 @@ python3 tools/migration_helper.py --topic MyTopic   # migrate a topic to wiki
 
 ---
 
+## How to Query
+
+### System B — Direct wiki lookup
+
+Best for named concepts, definitions, and past decisions. Zero cost — no embedding needed.
+
+```bash
+# See what's in a topic
+cat ~/.knowledge_base/Finance/index.md
+
+# Read a specific wiki page directly
+cat ~/.knowledge_base/Finance/entities/SP500.md
+cat ~/.knowledge_base/concepts/RAG.md
+```
+
+### System A — Semantic search
+
+Best for fuzzy or exploratory queries where you can't name the exact concept.
+
+```python
+# Full implementation in system-a-vector-db/README.md
+results = search("Finance", "passive investing strategies", top_k=5)
+for r in results:
+    print(f"[{r['score']:.2f}] {r['metadata']['source']}")
+    print(r['content'][:300])
+```
+
+### Routing at a glance
+
+| Your question | Start with | Fallback |
+|---------------|-----------|---------|
+| "What is X?" / "Tell me about Y" | System B (wiki) | System A |
+| "How does X compare to Y?" | System A | — |
+| "Find anything about Z" | System A | widen to all topics |
+| A past decision or personal note | System B (wiki) | System A |
+| "What's the latest on X?" | Web search | ingest result into KB |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete decision algorithm.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
