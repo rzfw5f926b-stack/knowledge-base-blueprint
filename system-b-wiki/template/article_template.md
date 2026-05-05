@@ -1,20 +1,22 @@
 ---
-title: "Article Title"
-topic: TopicName
-type: article        # article | procedure | decision | reference
-tags: []             # e.g. [finance, etf, passive-investing]
-source: "https://example.com/article"
-created: YYYY-MM-DD
+title: "Page Title"
+type: entity | concept
+sources: []
+last_confirmed: YYYY-MM-DD
+confidence: low | medium | high
+supersedes: []
+superseded_by: ""
+status: active
 ---
 
-# Article Title
+# Page Title
 
-Write the article content here. No length limit — include everything relevant.
+Write the content here. No length limit — include everything relevant.
 
 Key points:
 - Optimize for LLM reading: be explicit, avoid ambiguous pronouns
 - Include definitions for domain-specific terms
-- Link related concepts by name (the agent can search for them)
+- Link related concepts by name using `[[wikilink]]` syntax
 
 ## Section (optional)
 

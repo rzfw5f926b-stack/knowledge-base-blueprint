@@ -1,34 +1,66 @@
 # Dual Knowledge Base System — Architecture
 
+## Core Concepts
+
+Before reading further, understand these two orthogonal dimensions:
+
+### Storage Layer vs Retrieval Layer
+
+| Dimension | Option A | Option B |
+|-----------|----------|----------|
+| **Storage** (how data is stored) | Raw (`records.json`) | Wiki (`*.md`) |
+| **Retrieval** (how queries are answered) | System A (vector search) | System B (grep + index) |
+
+**System A runs entirely on Raw.** It does not depend on the Wiki layer.
+
+### Raw is the Entry Point — Wiki is the Derived Output
+
+All new knowledge enters through `records.json`. Wiki pages are crystallized from Raw by an LLM agent — they are not a parallel entry point.
+
+```
+New document arrives
+       │
+       ▼
+  records.json          ← always, no routing
+  (raw layer)
+       │
+       ▼ (crystallization — periodic or on demand)
+   wiki pages
+  (derived layer)
+```
+
+This means:
+- Wiki can always be rebuilt from Raw
+- Ingest is fast — no LLM needed at write time
+- Raw cannot be contaminated by wiki-side writes
+
+---
+
 ## System Overview
 
 ```
 Knowledge Input
        │
        ▼
- Classification Layer
+ Raw Layer (records.json)
        │
   ┌────┴────────────────────────────┐
   │                                 │
   ▼                                 ▼
 System A                        System B
 Vector DB                     Markdown Wiki
-records.json                   wiki/*.md
-(semantic search)             (direct lookup)
+(semantic search on raw)      (crystallized from raw)
 ```
 
 ---
 
 ## System A: Vector Database
 
-**Location:** `$KB_BASE/{Topic}/records.json`  
-**Embedding model:** `nomic-embed-text-v2-moe:latest` (768 dimensions)  
+**Location:** `$KB_BASE/{Topic}/records.json`
+**Embedding model:** `nomic-embed-text-v2-moe:latest` (768 dimensions)
 **Query method:** Cosine similarity, full scan (acceptable up to ~5K records)
 
-**When to use:**
-- Bulk document ingestion (entire documentation sites, books, PDFs)
-- Semantic similarity search — finding concepts you can't name exactly
-- Cross-domain concept matching
+**Role in this architecture:** The retrieval interface for the raw layer. Handles semantic queries that cannot be answered by exact-match wiki lookup.
 
 **Record schema:** See `system-a-vector-db/schema/record.example.json`
 
@@ -36,39 +68,50 @@ records.json                   wiki/*.md
 
 ## System B: Markdown Wiki
 
-**Location:** `$KB_BASE/wiki/{Topic}/*.md`  
-**Query method:** Direct file read / grep — zero embedding cost  
-**Maintained by:** AI agent (LLM writes and updates files directly)
+**Location:** `$KB_BASE/<Topic>/` (alongside raw data)
+**Query method:** Direct file read / grep — zero embedding cost
+**Maintained by:** AI agent (crystallized from raw, updated during lint)
 
-**When to use:**
-- Precise named concepts, definitions, personal experience
-- System architecture decisions
-- Reference material that humans also need to read
+**Directory structure:**
 
-**File format:** See `system-b-wiki/README.md`
+```
+$KB_BASE/
+├── SCHEMA.md               ← agent behavior protocol
+├── log.md                  ← append-only operation log
+├── concepts/               ← cross-topic abstractions and principles
+├── entities/               ← cross-topic tools, products, companies
+└── <Topic>/
+    ├── records.json        ← raw layer (System A)
+    ├── _summary.md         ← human-authored topic overview
+    ├── index.md            ← LLM-maintained page directory
+    ├── sources/            ← source summaries
+    └── entities/           ← topic-specific entities
+```
+
+See `system-b-wiki/README.md` and `SCHEMA.md` for full conventions.
 
 ---
 
-## Classification Decision Tree
+## Ingest Flow (no routing)
+
+**All new data goes directly into `records.json`.** There is no classification at ingest time.
 
 ```
 New document arrives
     │
-    ├─ Is this a bulk ingestion? (entire docs site, book, data dump)
-    │   └─ YES → System A (chunk + embed)
-    │
-    ├─ Will it be found via semantic similarity?
-    │   └─ YES → System A
-    │
-    └─ Is it a named concept, definition, or personal note?
-        └─ YES → System B (write .md + update _summary.md)
+    └─ records.json (always)
+       └─ log.md (append ingest record)
 ```
+
+Wiki crystallization happens separately — during periodic lint, or on explicit request.
+
+> **Deprecated**: the old decision tree ("new document → choose System A or System B") conflated ingest routing with query routing, which caused the wiki to never grow organically. The correct model: ingest always goes to raw; **query routing** decides which system to search.
 
 ---
 
-## Query Routing: AI Agent Decision Algorithm
+## Query Routing: Decision Algorithm
 
-When a user asks a question, follow this algorithm to decide where to search:
+When a question arrives, follow this algorithm to decide where to search:
 
 ### Step 1 — Classify the query
 
@@ -78,12 +121,12 @@ When a user asks a question, follow this algorithm to decide where to search:
 | Comparison or relationship ("how does X differ from Y") | System A |
 | Vague / exploratory ("something about financial risk") | System A |
 | "Latest", "recent", "when did" | Neither — use web search |
-| Personal notes, past decisions, architecture choices | System B |
+| Personal notes, past decisions, architecture choices | System B first |
 
 ### Step 2 — Execute the search
 
 **If System B first:**
-1. Scan `$KB_BASE/wiki/{relevant_topic}/_summary.md` to see if the topic exists
+1. Scan `$KB_BASE/<relevant_topic>/index.md` to see if the topic exists
 2. If a matching file is listed, read it directly
 3. If not found → fall through to System A
 
@@ -111,11 +154,11 @@ System A: no results above threshold
 
 ### Step 4 — After answering, consider updating the KB
 
-If you found the answer via web search (not KB), ask yourself:
+If you found the answer via web search (not KB), ask:
 - Is this knowledge stable and reusable?
 - Would future queries benefit from having this stored?
 
-If yes → ingest into System A (and optionally promote to System B via migration_helper).
+If yes → ingest into `records.json` (let lint crystallize it into the wiki later).
 
 ---
 
@@ -135,9 +178,13 @@ If yes → ingest into System A (and optionally promote to System B via migratio
 
 | Frequency | Task |
 |-----------|------|
-| Every write | Update `_summary.md` and `_tags.md` in the affected topic |
-| Quarterly | Review `_summary.md` files — condense if too long |
-| Annually | Full restructure of all `_summary.md` files |
+| Every ingest | Append to `log.md` |
+| Every wiki write | Update `index.md` in the affected topic |
+| Weekly | Run lint — check orphans, dead links, uncrystallized raw, stale pages |
+| Quarterly | Review `_summary.md` files — update if topic scope has shifted |
+| As needed | Cross-topic promotion when a page becomes referenced across topics |
+
+See `SCHEMA.md §8` for the full lint checklist.
 
 ---
 
@@ -149,7 +196,7 @@ When a topic's knowledge matures and needs human-readable organization:
 python3 tools/migration_helper.py --topic TopicName
 ```
 
-The tool converts `records.json` entries into individual `.md` files and updates the wiki index automatically.
+The tool converts `records.json` entries into source pages under `<Topic>/sources/` and rebuilds the topic `index.md`.
 
 ---
 
