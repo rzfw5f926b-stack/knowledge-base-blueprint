@@ -8,12 +8,12 @@ Knowledge Input
        ▼
  Ingest / Classify
        │
-  ┌────┴────────────────────────────┐
-  │                                 │
-  ▼                                 ▼
-System A                        System B
-Vector DB                     Routing / Index Layer
-source of truth               derived, optional synthesis
+       ▼
+System A
+Vector DB (source of truth)
+       │
+       └── promotion / synthesis ──► System B
+                                   Routing / Index Layer
 ```
 
 ---
