@@ -28,13 +28,14 @@ Any AI agent can read this repo and build the same system from scratch.
 New document arrives
         │
         ▼
-   Classification
+  Ingest / Classify
         │
-   ┌────┴────┐
-   │         │
-System A  System B
-Vector DB  Markdown Wiki
-(semantic) (structured)
+        ▼
+System A
+Vector DB (source of truth)
+        │
+        └── promotion / synthesis ──► System B
+                                      Routing / Index Layer
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full decision tree and query routing strategy.
