@@ -1,8 +1,8 @@
 # Dual Knowledge Base System Blueprint
 
 A self-contained blueprint for building an AI-powered dual knowledge base:
-- **System A** — Vector DB for semantic search (embedding-based)
-- **System B** — Markdown Wiki for structured, human-readable knowledge
+- **System A** — Vector DB, source of truth
+- **System B** — routing / index layer, derived from A
 
 Any AI agent can read this repo and build the same system from scratch.
 
@@ -14,11 +14,11 @@ Any AI agent can read this repo and build the same system from scratch.
 |----------|----------|
 | Bulk document ingestion (entire docs site, PDFs) | System A |
 | Semantic similarity search ("find concepts related to X") | System A |
-| Precise keyword lookup, named concepts, personal notes | System B |
+| Precise keyword lookup, named concepts, routing | System B |
 | Exploratory / uncertain queries | Both |
 
-**System A** excels at finding things you can't name precisely.  
-**System B** is instant, zero-cost, and human-readable.
+**System A** is the canonical archive.  
+**System B** helps the agent get back to the right A-records fast.
 
 ---
 
@@ -81,13 +81,15 @@ touch ~/.knowledge_base/wiki/MyTopic/_tags.md
 
 See [system-b-wiki/README.md](system-b-wiki/README.md) for file format and naming conventions.
 
-### Migration (A → B)
+### Promotion (A → B)
 
 ```bash
 export KB_BASE=~/.knowledge_base
 python3 tools/migration_helper.py --status          # view current state
 python3 tools/migration_helper.py --topic MyTopic   # migrate a topic to wiki
 ```
+
+Promotion is automatic in the final design when a record's `hit_count >= 3`.
 
 ---
 

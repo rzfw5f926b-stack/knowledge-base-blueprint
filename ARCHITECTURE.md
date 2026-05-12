@@ -6,15 +6,14 @@
 Knowledge Input
        │
        ▼
- Classification Layer
+ Ingest / Classify
        │
   ┌────┴────────────────────────────┐
   │                                 │
   ▼                                 ▼
 System A                        System B
-Vector DB                     Markdown Wiki
-records.json                   wiki/*.md
-(semantic search)             (direct lookup)
+Vector DB                     Routing / Index Layer
+source of truth               derived, optional synthesis
 ```
 
 ---
@@ -22,142 +21,103 @@ records.json                   wiki/*.md
 ## System A: Vector Database
 
 **Location:** `$KB_BASE/{Topic}/records.json`  
+**Role:** source of truth / immutable archive  
 **Embedding model:** `nomic-embed-text-v2-moe:latest` (768 dimensions)  
-**Query method:** Cosine similarity, full scan (acceptable up to ~5K records)
+**Query method:** semantic similarity / vector search
 
-**When to use:**
-- Bulk document ingestion (entire documentation sites, books, PDFs)
-- Semantic similarity search — finding concepts you can't name exactly
-- Cross-domain concept matching
+**Rules:**
+- all new knowledge lands here first
+- preserve provenance and traceability
+- never delete promoted records
+- track usage with `metadata.hit_count`
 
-**Record schema:** See `system-a-vector-db/schema/record.example.json`
+**Record schema:** see `SCHEMA.md` and `system-a-vector-db/schema/record.example.json`
 
 ---
 
-## System B: Markdown Wiki
+## System B: Routing / Index Layer
 
 **Location:** `$KB_BASE/wiki/{Topic}/*.md`  
-**Query method:** Direct file read / grep — zero embedding cost  
-**Maintained by:** AI agent (LLM writes and updates files directly)
+**Role:** fast routing, summaries, topic maps, and optional distilled synthesis  
+**Query method:** direct file read / grep / simple index lookup  
+**Maintained by:** AI agent
 
-**When to use:**
-- Precise named concepts, definitions, personal experience
-- System architecture decisions
-- Reference material that humans also need to read
+**Rules:**
+- System B is derived from System A
+- System B may contain only pointers, summaries, and high-value synthesis
+- System B should stay lean and navigable
 
-**File format:** See `system-b-wiki/README.md`
+**File format:** see `SCHEMA.md` and `system-b-wiki/README.md`
 
 ---
 
-## Classification Decision Tree
+## Promotion Rule
 
 ```
-New document arrives
+System A record queried
     │
-    ├─ Is this a bulk ingestion? (entire docs site, book, data dump)
-    │   └─ YES → System A (chunk + embed)
+    ├─ hit_count < 3 → keep in A only
     │
-    ├─ Will it be found via semantic similarity?
-    │   └─ YES → System A
-    │
-    └─ Is it a named concept, definition, or personal note?
-        └─ YES → System B (write .md + update _summary.md)
+    └─ hit_count >= 3 → auto-promote to System B
 ```
+
+**Promotion behavior:**
+- automatic
+- preserve System A record
+- write/update System B entry
+- mark metadata:
+  - `promoted_to_wiki = true`
+  - `promoted_at = YYYY-MM-DD`
 
 ---
 
-## Query Routing: AI Agent Decision Algorithm
+## Query Routing
 
-When a user asks a question, follow this algorithm to decide where to search:
+### Step 1 — Classify
 
-### Step 1 — Classify the query
+| Signal | Route |
+|--------|-------|
+| Exact name / acronym / title | System B first |
+| Exploratory / semantic / comparison | System A first |
+| Ambiguous | Both |
+| Latest / recent / current event | Web search |
+| Personal notes / decisions | System B first |
 
-| Signal in the question | Route |
-|------------------------|-------|
-| Exact name, acronym, or title ("what is X", "tell me about Y") | System B first |
-| Comparison or relationship ("how does X differ from Y") | System A |
-| Vague / exploratory ("something about financial risk") | System A |
-| "Latest", "recent", "when did" | Neither — use web search |
-| Personal notes, past decisions, architecture choices | System B |
+### Step 2 — Execute
 
-### Step 2 — Execute the search
+**System B first:**
+1. read `_summary.md` / `_tags.md`
+2. follow relevant links or pointers
+3. if insufficient, fall through to System A
 
-**If System B first:**
-1. Scan `$KB_BASE/wiki/{relevant_topic}/_summary.md` to see if the topic exists
-2. If a matching file is listed, read it directly
-3. If not found → fall through to System A
+**System A first:**
+1. semantic search across the relevant topic
+2. take top results above threshold
+3. use them as source material for the answer
 
-**If System A:**
-1. Embed the query using the same model (`nomic-embed-text-v2-moe:latest`)
-2. Run cosine similarity against the relevant topic's `records.json`
-3. Take top 3–5 results above a score threshold (recommend: > 0.75)
+### Step 3 — After answering
 
-**If both:**
-1. Run System B lookup first (it's instant)
-2. Run System A in parallel or immediately after
-3. Merge results — prefer System B for definitions, System A for context
-
-### Step 3 — Handle no results
-
-```
-System B: no match found
-    └─ Fall through to System A automatically
-
-System A: no results above threshold
-    └─ Widen search to all topics (not just the assumed topic)
-    └─ If still nothing → tell the user: "Not in the knowledge base.
-       Do you want me to search the web and add this to the KB?"
-```
-
-### Step 4 — After answering, consider updating the KB
-
-If you found the answer via web search (not KB), ask yourself:
-- Is this knowledge stable and reusable?
-- Would future queries benefit from having this stored?
-
-If yes → ingest into System A (and optionally promote to System B via migration_helper).
+If the answer is stable and reusable:
+- keep it in System A
+- optionally auto-promote to System B when hit_count threshold is reached
 
 ---
 
-## Query Routing Examples
-
-| User question | Decision | Reason |
-|---------------|----------|--------|
-| "What is the RIC rule?" | System B | Named regulation — likely in wiki |
-| "How does VT ETF compare to QQQ?" | System A | Comparative, semantic |
-| "What did I decide about the DB upgrade?" | System B | Personal decision log |
-| "Find anything related to inflation hedging" | System A | Exploratory, semantic |
-| "Summarize what we know about Ethereum" | Both | Named topic + may have depth in A |
-
----
-
-## Maintenance Schedule
+## Maintenance
 
 | Frequency | Task |
 |-----------|------|
-| Every write | Update `_summary.md` and `_tags.md` in the affected topic |
-| Quarterly | Review `_summary.md` files — condense if too long |
-| Annually | Full restructure of all `_summary.md` files |
+| Every write | Update source metadata / hit counts |
+| On promotion | Write System B entry + update `_summary.md` / `_tags.md` |
+| Periodic | Lint for stale links, duplicates, orphan pages |
 
 ---
 
-## Migration: System A → System B
-
-When a topic's knowledge matures and needs human-readable organization:
-
-```bash
-python3 tools/migration_helper.py --topic TopicName
-```
-
-The tool converts `records.json` entries into individual `.md` files and updates the wiki index automatically.
-
----
-
-## Scaling Path
+## Scaling
 
 | Record Count | Recommendation |
 |-------------|---------------|
-| < 5,000 | NumPy full scan — simple, no dependencies |
-| 5,000–50,000 | sqlite-vec with HNSW index |
-| > 50,000 | Add cross-encoder reranker (e.g. `ms-marco-MiniLM`) after vector search: retrieve top-20, rerank to top-5 |
-| > 100,000 | Qdrant or similar vector DB service |
+| < 5,000 | full scan is fine |
+| 5,000–50,000 | add index / sqlite-vec |
+| > 50,000 | add reranker |
+| > 100,000 | move to dedicated vector service |
