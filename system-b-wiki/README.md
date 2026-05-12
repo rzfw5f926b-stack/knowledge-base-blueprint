@@ -1,10 +1,8 @@
-# System B: Markdown Wiki
+# System B: Routing / Index Layer
 
-A flat-file wiki maintained by an AI agent. No database, no indexing — just markdown files that both humans and LLMs can read.
+A flat-file routing index automatically promoted from System A. No database, no manual curation — pages are synthesized by an LLM when a document's `hit_count` reaches the promotion threshold.
 
-Inspired by [Andrej Karpathy's LLM Wiki approach](https://www.mindstudio.ai/blog/andrej-karpathy-llm-wiki-knowledge-base-claude-code): optimize for LLM reading, not human browsing.
-
-**Wiki pages are crystallized from the raw layer (`records.json`), not written directly.** See [SCHEMA.md](../SCHEMA.md) for the full maintenance protocol.
+**System B does not store full content.** It stores routing index pages that point back to System A record IDs. When an agent needs the full content, it fetches from System A using `system_a_ids`.
 
 ---
 
@@ -12,101 +10,99 @@ Inspired by [Andrej Karpathy's LLM Wiki approach](https://www.mindstudio.ai/blog
 
 ```
 $KB_BASE/
-├── SCHEMA.md               ← agent behavior protocol
-├── log.md                  ← append-only operation log
-├── concepts/               ← cross-topic abstractions and principles
-│   └── RAG.md
-├── entities/               ← cross-topic tools, products, companies
-│   └── Tailscale.md
-└── <Topic>/
-    ├── records.json        ← raw layer (System A — do not modify)
-    ├── _summary.md         ← human-authored topic overview
-    ├── index.md            ← LLM-maintained page directory
-    ├── sources/            ← one page per ingested source
-    │   └── <source-slug>.md
-    └── entities/           ← topic-specific entities
-        └── <Entity>.md
+└── wiki/
+    └── {Topic}/
+        ├── _summary.md     ← human-authored topic overview (do not overwrite)
+        ├── _tags.md        ← agent-maintained tag index
+        └── <doc-slug>.md   ← routing index pages (auto-promoted)
 ```
 
 ---
 
 ## File Naming
 
-- Use PascalCase for entities and concepts: `VectorEmbedding.md`, `Tailscale.md`
-- Use kebab-case for source slugs: `openai-gpt4-technical-report.md`
-- Chinese titles are fine: `人工智慧革命.md`
+- Use kebab-case for doc slugs: `vanguard-etf-guide.md`
+- Derived from `doc_name` in System A metadata
 - Max 60 characters, no spaces
 
 ---
 
-## Article Format
+## Routing Index Page Format
 
 See [`template/article_template.md`](template/article_template.md).
 
-Every wiki page starts with YAML frontmatter:
+Every routing index page must follow this format:
 
 ```yaml
 ---
-title: "Page Title"
-type: entity | concept
-sources: [source-slug-1, source-slug-2]
-last_confirmed: YYYY-MM-DD
-confidence: low | medium | high
-supersedes: []
-superseded_by: ""
+title: "Document Title"
+topic: TopicName
+system_a_ids:
+  - 550e8400-e29b-41d4-a716-446655440000
+  - 7c9e6679-7425-40de-944b-e07fc1f90ae7
+promoted_at: YYYY-MM-DD
 status: active
 ---
+
+# Document Title
+
+2–3 sentence description of what this document covers and why it matters.
+
+**Key topics:** topic1, topic2, topic3
+
+---
+*Routing index — full content available in System A*
 ```
-
-**`confidence` rules:**
-- `low` — 1 source supports this
-- `medium` — 2–3 sources support this
-- `high` — 4+ sources, at least one confirmed within the last 30 days
-
-**`status` values:** `active` / `stale` / `redirected` — no other values allowed
 
 ---
 
 ## Index Files
 
-**`_summary.md`** — written by the **human owner**. Describes the topic's scope, purpose, and boundaries. Agents read it for context but must not overwrite it.
+**`_summary.md`** — written by the **human owner**. Describes topic scope, purpose, and boundaries. Agents read it for context but must not overwrite it.
 
-**`index.md`** — maintained by the **agent** after each wiki write. Contains a linked list of all pages in the topic with one-line descriptions.
-
----
-
-## Agent Instructions: How to Add a New Page
-
-1. **Search first** — before creating, grep these three locations in order:
-   - Top-level `concepts/`
-   - Target topic's `entities/`
-   - Legacy files at the topic root (read-only — do not write here)
-
-   Only create if nothing is found in all three.
-
-2. Determine `type`: entity or concept?
-   - **entity** — specific, nameable thing (person, product, company, tool, place)
-   - **concept** — abstract method, principle, or pattern
-   - Test: "Can this be owned or developed by a specific company?" Yes → entity; No → concept
-
-3. Write the page with correct frontmatter, save to the appropriate directory
-
-4. Update `index.md` — add a link and one-line description
-
-5. Append to `log.md`:
-   ```
-   ## [YYYY-MM-DD] crystallize | <topic> | 1 page written
-   ```
-
-6. If this page supersedes an older one, follow SCHEMA.md §6.5
+**`_tags.md`** — maintained by the **agent**. Tag index linking key topics to routing pages. Updated after every promotion.
 
 ---
 
-## When to Use System B vs System A
+## How Routing Pages Are Created
+
+Routing pages are created automatically by `tools/migration_helper.py --promote`:
+
+1. Scan all topics for records with `hit_count >= 3`
+2. Group by `doc_name` — skip records with no `doc_name`
+3. Feed ALL chunks from the same `doc_name` to `qwen3.5:9b`
+4. LLM outputs: title, 2–3 sentence description, key topics
+5. Write routing page with `system_a_ids` pointing to all chunk UUIDs
+6. Mark all chunks: `promoted_to_wiki = true`, `promoted_at = today`
+7. Overwrite if a page for this `doc_name` already exists
+
+---
+
+## How to Use a Routing Page
+
+When System B returns a match:
+
+```python
+import json, yaml
+from pathlib import Path
+
+wiki_page = Path("~/.knowledge_base/wiki/Finance/vanguard-etf-guide.md").read_text()
+
+# Parse frontmatter
+frontmatter = yaml.safe_load(wiki_page.split("---")[1])
+system_a_ids = frontmatter["system_a_ids"]
+
+# Fetch full content from System A
+records = json.loads(Path("~/.knowledge_base/Finance/records.json").read_text())
+full_chunks = [r for r in records if r["id"] in system_a_ids]
+```
+
+---
+
+## When System B Helps (and When It Doesn't)
 
 | Use System B when... | Use System A when... |
 |---------------------|---------------------|
-| The concept has a clear name | You need fuzzy/semantic search |
-| It's a mature, verified piece of knowledge | It's raw or recently ingested |
-| Humans also need to read it | It's a bulk document dump |
-| You want instant lookup (no embedding cost) | You need cross-document similarity |
+| Query matches a known document title | Exploratory / fuzzy query |
+| You want zero embedding cost | First time querying a topic |
+| The document has been accessed 3+ times | Document was just ingested |

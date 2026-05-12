@@ -2,54 +2,27 @@
 
 ## Core Concepts
 
-Before reading further, understand these two orthogonal dimensions:
-
 ### Storage Layer vs Retrieval Layer
 
 | Dimension | Option A | Option B |
 |-----------|----------|----------|
-| **Storage** (how data is stored) | Raw (`records.json`) | Wiki (`*.md`) |
-| **Retrieval** (how queries are answered) | System A (vector search) | System B (grep + index) |
+| **Storage** | Raw (`records.json`) | Wiki (`wiki/{Topic}/*.md`) |
+| **Retrieval** | System A (vector search) | System B (direct read / grep) |
 
-**System A runs entirely on Raw.** It does not depend on the Wiki layer.
+System A runs entirely on Raw. System B is a derived routing layer — it does not replace System A.
 
-### Raw is the Entry Point — Wiki is the Derived Output
-
-All new knowledge enters through `records.json`. Wiki pages are crystallized from Raw by an LLM agent — they are not a parallel entry point.
+### Data Flow
 
 ```
-New document arrives
-       │
-       ▼
-  records.json          ← always, no routing
-  (raw layer)
-       │
-       ▼ (crystallization — periodic or on demand)
-   wiki pages
-  (derived layer)
-```
-
-This means:
-- Wiki can always be rebuilt from Raw
-- Ingest is fast — no LLM needed at write time
-- Raw cannot be contaminated by wiki-side writes
-
----
-
-## System Overview
-
-```
-Knowledge Input
-       │
-       ▼
- Raw Layer (records.json)
-       │
-  ┌────┴────────────────────────────┐
-  │                                 │
-  ▼                                 ▼
-System A                        System B
-Vector DB                     Markdown Wiki
-(semantic search on raw)      (crystallized from raw)
+New document
+     │
+     ▼
+records.json            ← immutable, source of truth
+     │
+     │  every query → hit_count + 1
+     │
+     └── hit_count >= 3 ──► wiki/{Topic}/<slug>.md
+                             (routing index, LLM-synthesized)
 ```
 
 ---
@@ -57,146 +30,111 @@ Vector DB                     Markdown Wiki
 ## System A: Vector Database
 
 **Location:** `$KB_BASE/{Topic}/records.json`
+**Role:** immutable archive and semantic search layer
 **Embedding model:** `nomic-embed-text-v2-moe:latest` (768 dimensions)
-**Query method:** Cosine similarity, full scan (acceptable up to ~5K records)
+**Query method:** cosine similarity
 
-**Role in this architecture:** The retrieval interface for the raw layer. Handles semantic queries that cannot be answered by exact-match wiki lookup.
+**Rules:**
+- All new knowledge enters here first
+- Records are never deleted
+- `hit_count` is incremented on every query hit
+- Provenance is preserved via `id` (UUID) and `content_hash`
 
-**Record schema:** See `system-a-vector-db/schema/record.example.json`
+**Record schema:** see `SCHEMA.md §4` and `system-a-vector-db/schema/record.example.json`
 
 ---
 
-## System B: Markdown Wiki
+## System B: Routing / Index Layer
 
-**Location:** `$KB_BASE/<Topic>/` (alongside raw data)
-**Query method:** Direct file read / grep — zero embedding cost
-**Maintained by:** AI agent (crystallized from raw, updated during lint)
+**Location:** `$KB_BASE/wiki/{Topic}/*.md`
+**Role:** fast routing index for frequently-accessed documents
+**Query method:** direct file read / grep — zero embedding cost
+**Maintained by:** AI agent (auto-promoted from System A)
 
-**Directory structure:**
+**What a routing index page contains:**
+- 2–3 sentence description of the document
+- Key topics for discoverability
+- `system_a_ids` — UUIDs pointing back to the original System A records
+
+**What it does NOT contain:** full document content (always in System A)
 
 ```
 $KB_BASE/
-├── SCHEMA.md               ← agent behavior protocol
-├── log.md                  ← append-only operation log
-├── concepts/               ← cross-topic abstractions and principles
-├── entities/               ← cross-topic tools, products, companies
-└── <Topic>/
-    ├── records.json        ← raw layer (System A)
-    ├── _summary.md         ← human-authored topic overview
-    ├── index.md            ← LLM-maintained page directory
-    ├── sources/            ← source summaries
-    └── entities/           ← topic-specific entities
+├── {Topic}/
+│   └── records.json
+└── wiki/
+    └── {Topic}/
+        ├── _summary.md     ← human-authored
+        ├── _tags.md        ← agent-maintained
+        └── <doc-slug>.md   ← routing index (auto-promoted)
 ```
-
-See `system-b-wiki/README.md` and `SCHEMA.md` for full conventions.
 
 ---
 
-## Ingest Flow (no routing)
-
-**All new data goes directly into `records.json`.** There is no classification at ingest time.
+## Promotion Rule
 
 ```
-New document arrives
+System A record queried
     │
-    └─ records.json (always)
-       └─ log.md (append ingest record)
+    ├── hit_count < 3 → stays in A only
+    │
+    └── hit_count >= 3 → promotion triggered
+            │
+            ├── find ALL chunks with same doc_name
+            ├── doc_name missing → skip
+            ├── feed all chunks to qwen3.5:9b
+            ├── synthesize routing index page
+            └── write to wiki/{Topic}/<slug>.md
+                mark all chunks: promoted_to_wiki = true
 ```
 
-Wiki crystallization happens separately — during periodic lint, or on explicit request.
-
-> **Deprecated**: the old decision tree ("new document → choose System A or System B") conflated ingest routing with query routing, which caused the wiki to never grow organically. The correct model: ingest always goes to raw; **query routing** decides which system to search.
+Promotion overwrites any existing wiki page for the same `doc_name`.
 
 ---
 
-## Query Routing: Decision Algorithm
+## Query Routing
 
-When a question arrives, follow this algorithm to decide where to search:
+### Step 1 — Classify
 
-### Step 1 — Classify the query
+| Signal | Route |
+|--------|-------|
+| Exact name / known term | System B first |
+| Semantic / exploratory | System A first |
+| Comparison ("X vs Y") | System A |
+| "Latest" / "recent" | Web search |
+| Personal notes / decisions | System B first |
 
-| Signal in the question | Route |
-|------------------------|-------|
-| Exact name, acronym, or title ("what is X", "tell me about Y") | System B first |
-| Comparison or relationship ("how does X differ from Y") | System A |
-| Vague / exploratory ("something about financial risk") | System A |
-| "Latest", "recent", "when did" | Neither — use web search |
-| Personal notes, past decisions, architecture choices | System B first |
+### Step 2 — Execute
 
-### Step 2 — Execute the search
+**System B first:**
+1. Scan `wiki/{Topic}/` for matching routing pages
+2. Found → read `system_a_ids`, fetch those records from System A for full content
+3. Not found → fall through to System A
 
-**If System B first:**
-1. Scan `$KB_BASE/<relevant_topic>/index.md` to see if the topic exists
-2. If a matching file is listed, read it directly
-3. If not found → fall through to System A
+**System A:**
+1. Embed query (`nomic-embed-text-v2-moe:latest`)
+2. Cosine similarity on `records.json`, threshold > 0.75
+3. Return top 3–5 results, increment `hit_count` on each
 
-**If System A:**
-1. Embed the query using the same model (`nomic-embed-text-v2-moe:latest`)
-2. Run cosine similarity against the relevant topic's `records.json`
-3. Take top 3–5 results above a score threshold (recommend: > 0.75)
-
-**If both:**
-1. Run System B lookup first (it's instant)
-2. Run System A in parallel or immediately after
-3. Merge results — prefer System B for definitions, System A for context
-
-### Step 3 — Handle no results
+### Step 3 — No results
 
 ```
-System B: no match found
-    └─ Fall through to System A automatically
-
-System A: no results above threshold
-    └─ Widen search to all topics (not just the assumed topic)
-    └─ If still nothing → tell the user: "Not in the knowledge base.
-       Do you want me to search the web and add this to the KB?"
+System B: miss → fall through to System A
+System A: miss → widen to all topics
+          still miss → "Not found. Search web and add to KB?"
 ```
-
-### Step 4 — After answering, consider updating the KB
-
-If you found the answer via web search (not KB), ask:
-- Is this knowledge stable and reusable?
-- Would future queries benefit from having this stored?
-
-If yes → ingest into `records.json` (let lint crystallize it into the wiki later).
 
 ---
 
-## Query Routing Examples
-
-| User question | Decision | Reason |
-|---------------|----------|--------|
-| "What is the RIC rule?" | System B | Named regulation — likely in wiki |
-| "How does VT ETF compare to QQQ?" | System A | Comparative, semantic |
-| "What did I decide about the DB upgrade?" | System B | Personal decision log |
-| "Find anything related to inflation hedging" | System A | Exploratory, semantic |
-| "Summarize what we know about Ethereum" | Both | Named topic + may have depth in A |
-
----
-
-## Maintenance Schedule
+## Maintenance
 
 | Frequency | Task |
 |-----------|------|
 | Every ingest | Append to `log.md` |
-| Every wiki write | Update `index.md` in the affected topic |
-| Weekly | Run lint — check orphans, dead links, uncrystallized raw, stale pages |
-| Quarterly | Review `_summary.md` files — update if topic scope has shifted |
-| As needed | Cross-topic promotion when a page becomes referenced across topics |
-
-See `SCHEMA.md §8` for the full lint checklist.
-
----
-
-## Migration: System A → System B
-
-When a topic's knowledge matures and needs human-readable organization:
-
-```bash
-python3 tools/migration_helper.py --topic TopicName
-```
-
-The tool converts `records.json` entries into source pages under `<Topic>/sources/` and rebuilds the topic `index.md`.
+| Every query | Increment `hit_count` on returned records |
+| On promotion | Write wiki page, mark records as promoted |
+| Weekly | Lint — orphan wiki pages, dead `system_a_ids`, stale entries |
+| Quarterly | Review `_summary.md` topic overviews |
 
 ---
 
@@ -204,7 +142,9 @@ The tool converts `records.json` entries into source pages under `<Topic>/source
 
 | Record Count | Recommendation |
 |-------------|---------------|
-| < 5,000 | NumPy full scan — simple, no dependencies |
+| < 5,000 | NumPy full scan |
 | 5,000–50,000 | sqlite-vec with HNSW index |
-| > 50,000 | Add cross-encoder reranker (e.g. `ms-marco-MiniLM`) after vector search: retrieve top-20, rerank to top-5 |
-| > 100,000 | Qdrant or similar vector DB service |
+| > 50,000 | Add cross-encoder reranker (e.g. `ms-marco-MiniLM`): retrieve top-20, rerank to top-5 |
+| > 100,000 | Qdrant or similar dedicated vector DB |
+
+> When `hit_count` updates become a concurrency bottleneck (multiple agents writing simultaneously), migrate `records.json` to SQLite with file-level locking.

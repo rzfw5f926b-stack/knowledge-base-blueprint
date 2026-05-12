@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Migration Helper — Vector DB (System A) → Markdown Wiki (System B)
+Migration Helper — System A (Vector DB) → System B (Routing Index)
 
-用途：將 Vector DB 內任何 Topic 的 records.json 轉換為 Wiki 格式的來源頁（sources/），
-      並重建該 Topic 的 index.md。
+用途：掃描 System A 中 hit_count >= 3 的文件，呼叫 LLM 合成路由索引頁，
+      寫入 System B（wiki/{Topic}/），並將 records 標記為 promoted。
 
 用法：
-  python3 migration_helper.py --topic Finance              # 遷移單一 Topic
-  python3 migration_helper.py --topic Finance --dry-run    # 預覽（不寫入）
-  python3 migration_helper.py --list-topics                # 列出所有可用 Topic
-  python3 migration_helper.py --status                     # 顯示系統狀態
-  python3 migration_helper.py --rebuild-index              # 重建所有 Topic 的 index.md
+  python3 migration_helper.py --promote Finance          # 升級單一 Topic
+  python3 migration_helper.py --promote-all              # 升級所有 Topic
+  python3 migration_helper.py --promote Finance --dry-run  # 預覽
+  python3 migration_helper.py --status                   # 顯示系統狀態
+  python3 migration_helper.py --list-topics              # 列出可用 Topic
 """
 
 import argparse
@@ -18,13 +18,21 @@ import json
 import os
 import re
 import uuid
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-BASE = Path(os.environ.get("KB_BASE", Path.home() / ".knowledge_base"))
-CONCEPTS_DIR = BASE / "concepts"
-ENTITIES_DIR = BASE / "entities"
+import ollama
 
+BASE = Path(os.environ.get("KB_BASE", Path.home() / ".knowledge_base"))
+WIKI_BASE = BASE / "wiki"
+SYNTHESIS_MODEL = os.environ.get("SYNTHESIS_MODEL", "qwen3.5:9b")
+HIT_THRESHOLD = int(os.environ.get("PROMOTE_THRESHOLD", "3"))
+
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
 
 def load_records(topic: str) -> list[dict]:
     path = BASE / topic / "records.json"
@@ -39,223 +47,257 @@ def load_records(topic: str) -> list[dict]:
     raise ValueError(f"records.json 格式不符：{path}")
 
 
+def save_records(topic: str, records: list[dict]):
+    path = BASE / topic / "records.json"
+    with open(path, "w") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Grouping
+# ---------------------------------------------------------------------------
+
+def group_by_doc_name(records: list[dict]) -> dict[str, list[dict]]:
+    """Group records by doc_name. Records without doc_name are skipped."""
+    groups = defaultdict(list)
+    for r in records:
+        doc_name = r.get("metadata", {}).get("doc_name")
+        if doc_name:
+            groups[doc_name].append(r)
+    return dict(groups)
+
+
+def eligible_groups(groups: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """Return only groups where at least one chunk has hit_count >= threshold."""
+    result = {}
+    for doc_name, chunks in groups.items():
+        max_hits = max(c.get("metadata", {}).get("hit_count", 0) for c in chunks)
+        if max_hits >= HIT_THRESHOLD:
+            result[doc_name] = chunks
+    return result
+
+
+# ---------------------------------------------------------------------------
+# LLM synthesis
+# ---------------------------------------------------------------------------
+
+def synthesize(chunks: list[dict], model: str = SYNTHESIS_MODEL) -> dict:
+    """Call LLM to produce a routing index entry from all chunks of a document."""
+    texts = []
+    for i, chunk in enumerate(chunks):
+        text = (chunk.get("text") or chunk.get("content") or "").strip()
+        if text:
+            texts.append(f"[Chunk {i + 1}]\n{text}")
+
+    combined = "\n---\n".join(texts)
+
+    prompt = f"""You are a knowledge base indexer. Given the following document chunks, write a brief routing index entry.
+
+Output exactly this format (no extra text):
+Title: <concise document title, 1–5 words>
+Description: <2–3 sentences describing what this document covers and why it matters>
+Topics: <comma-separated key topics a reader might search for>
+
+Be concise. This is a routing index to help an AI decide whether to retrieve the full document.
+
+Document chunks:
+---
+{combined}
+---
+
+Routing index entry:"""
+
+    response = ollama.chat(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0.1},
+    )
+
+    raw = response["message"]["content"].strip()
+    result = {"title": "", "description": "", "topics": []}
+
+    for line in raw.splitlines():
+        if line.startswith("Title:"):
+            result["title"] = line[6:].strip()
+        elif line.startswith("Description:"):
+            result["description"] = line[12:].strip()
+        elif line.startswith("Topics:"):
+            result["topics"] = [t.strip() for t in line[7:].split(",") if t.strip()]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Wiki page building
+# ---------------------------------------------------------------------------
+
 def slugify(text: str) -> str:
-    """將標題轉換為 URL-safe 的 slug，保留中文、英文、數字"""
-    allowed = re.compile(r'[^一-鿿A-Za-z0-9-]')
-    text = allowed.sub('-', text)
-    text = re.sub(r'-+', '-', text)
-    result = text.strip('-')[:60]
-    return result if result else f"source-{uuid.uuid4().hex[:8]}"
+    allowed = re.compile(r"[^一-鿿A-Za-z0-9-]")
+    text = allowed.sub("-", text)
+    text = re.sub(r"-+", "-", text)
+    return text.strip("-")[:60] or f"doc-{uuid.uuid4().hex[:8]}"
 
 
-def extract_title(text: str, metadata: dict) -> str:
-    """從文字內容或 metadata 猜測標題"""
-    if text:
-        first_line = text.strip().split("\n")[0][:60]
-        if len(first_line) >= 10:
-            cleaned = first_line.lstrip('#').lstrip('*').strip()
-            if cleaned:
-                return cleaned
-    source = metadata.get("source", "")
-    if source:
-        path_part = source.rstrip("/").split("/")[-1]
-        path_part = re.sub(r'\.(txt|md|html?|pdf|docx)$', '', path_part, flags=re.IGNORECASE)
-        path_part = re.sub(r'^[\w]+---', '', path_part)
-        if path_part and path_part not in ("", "index"):
-            return path_part.replace("-", " ").replace("_", " ").strip()
-    return "Untitled"
+def build_wiki_page(doc_name: str, synthesis: dict, chunks: list[dict], topic: str) -> str:
+    title = synthesis.get("title") or doc_name.replace("-", " ").title()
+    description = synthesis.get("description", "")
+    topics = synthesis.get("topics", [])
 
+    ids = [c.get("id", "") for c in chunks if c.get("id")]
+    ids_yaml = "\n".join(f"  - {i}" for i in ids)
+    topics_str = ", ".join(topics) if topics else "—"
+    today = datetime.now().strftime("%Y-%m-%d")
 
-def extract_source_slug(metadata: dict) -> str:
-    """從 metadata 取得或生成 source slug"""
-    source = metadata.get("source", "")
-    doc_name = metadata.get("doc_name", "")
-    base = doc_name or source
-    if base:
-        slug = base.rstrip("/").split("/")[-1]
-        slug = re.sub(r'\.(txt|md|html?|pdf|docx)$', '', slug, flags=re.IGNORECASE)
-        slug = re.sub(r'[^\w-]', '-', slug)
-        slug = re.sub(r'-+', '-', slug).strip('-')[:60]
-        if slug:
-            return slug
-    return f"source-{uuid.uuid4().hex[:8]}"
-
-
-def record_to_source_page(record: dict) -> tuple[str, str]:
-    """將單筆記錄轉換為 sources/ 格式的頁面，返回 (slug, content)"""
-    text = (record.get("content") or record.get("text") or "").strip()
-    metadata = record.get("metadata", {})
-
-    title = extract_title(text, metadata)
-    slug = slugify(extract_source_slug(metadata))
-    source_url = metadata.get("source", "unknown")
-    indexed_at = metadata.get("indexed_at", datetime.now().isoformat())[:10]
-
-    content = re.sub(r'<[^>]+>', '', text)
-    content = re.sub(r'\n{3,}', '\n\n', content).strip()
-
-    page = f"""---
+    return f"""---
 title: "{title}"
-type: concept
-sources: ["{slug}"]
-last_confirmed: {indexed_at}
-confidence: low
-supersedes: []
-superseded_by: ""
+topic: {topic}
+system_a_ids:
+{ids_yaml}
+promoted_at: {today}
 status: active
 ---
 
 # {title}
 
-**Source:** {source_url}
-**Indexed:** {indexed_at}
+{description}
+
+**Key topics:** {topics_str}
 
 ---
-
-{content}
+*Routing index — full content available in System A*
 """
-    return slug, page
 
 
-def ensure_wiki_structure(topic: str):
-    """確保 Topic 目錄結構存在"""
-    topic_dir = BASE / topic
-    topic_dir.mkdir(parents=True, exist_ok=True)
-    (topic_dir / "sources").mkdir(exist_ok=True)
-    (topic_dir / "entities").mkdir(exist_ok=True)
-    CONCEPTS_DIR.mkdir(parents=True, exist_ok=True)
-    ENTITIES_DIR.mkdir(parents=True, exist_ok=True)
-    return topic_dir
+# ---------------------------------------------------------------------------
+# Promotion
+# ---------------------------------------------------------------------------
 
+def promote_topic(topic: str, dry_run: bool = False, model: str = SYNTHESIS_MODEL) -> int:
+    """Promote eligible documents in a topic to System B routing index pages."""
+    records = load_records(topic)
+    groups = group_by_doc_name(records)
+    candidates = eligible_groups(groups)
 
-def write_wiki_topic(topic: str, records: list[dict], dry_run: bool = False) -> int:
-    """將一個 Topic 的所有 records 寫入 sources/ 格式"""
-    topic_dir = ensure_wiki_structure(topic)
-    sources_dir = topic_dir / "sources"
-    written = 0
+    if not candidates:
+        print(f"  {topic}: 無符合條件的文件（hit_count < {HIT_THRESHOLD}）")
+        return 0
 
-    existing_slugs = set(f.stem for f in sources_dir.glob("*.md"))
+    wiki_topic_dir = WIKI_BASE / topic
+    if not dry_run:
+        wiki_topic_dir.mkdir(parents=True, exist_ok=True)
 
-    for record in records:
-        text = (record.get("text") or record.get("content") or "").strip()
-        if len(text) < 50:
+    promoted = 0
+    for doc_name, chunks in candidates.items():
+        max_hits = max(c.get("metadata", {}).get("hit_count", 0) for c in chunks)
+        print(f"  {'[預覽] ' if dry_run else ''}升級：{doc_name} "
+              f"({len(chunks)} chunks, max hit_count={max_hits})")
+
+        if dry_run:
+            promoted += 1
             continue
 
-        slug, page_content = record_to_source_page(record)
+        # Synthesize routing index
+        synthesis = synthesize(chunks, model=model)
+        wiki_content = build_wiki_page(doc_name, synthesis, chunks, topic)
 
-        base_slug = slug
-        counter = 1
-        while slug in existing_slugs:
-            slug = f"{base_slug}-{counter}"
-            counter += 1
-        existing_slugs.add(slug)
+        # Write wiki page (overwrite if exists)
+        slug = slugify(doc_name)
+        wiki_path = wiki_topic_dir / f"{slug}.md"
+        wiki_path.write_text(wiki_content)
 
-        if not dry_run:
-            (sources_dir / f"{slug}.md").write_text(page_content)
-        written += 1
+        # Mark records as promoted
+        today = datetime.now().strftime("%Y-%m-%d")
+        promoted_ids = {c.get("id") for c in chunks}
+        for r in records:
+            if r.get("id") in promoted_ids:
+                r["metadata"]["promoted_to_wiki"] = True
+                r["metadata"]["promoted_at"] = today
 
-    if not dry_run:
-        build_topic_index(topic)
+        promoted += 1
 
-    return written
+    if not dry_run and promoted > 0:
+        save_records(topic, records)
+        rebuild_tags(topic)
+
+    return promoted
 
 
-def build_topic_index(topic: str):
-    """重建 Topic 的 index.md"""
-    topic_dir = BASE / topic
-    if not topic_dir.exists():
+# ---------------------------------------------------------------------------
+# Tag index
+# ---------------------------------------------------------------------------
+
+def rebuild_tags(topic: str):
+    """Rebuild _tags.md for a topic from all routing index pages."""
+    wiki_dir = WIKI_BASE / topic
+    if not wiki_dir.exists():
         return
 
-    lines = [
-        f"# {topic} — Index",
-        "",
-        f"**Last updated:** {datetime.now().strftime('%Y-%m-%d')}",
-        "",
-        "---",
-        "",
-    ]
-
-    sources_dir = topic_dir / "sources"
-    if sources_dir.exists():
-        source_files = sorted(sources_dir.glob("*.md"))
-        if source_files:
-            lines.append("## Sources")
-            lines.append("")
-            for f in source_files:
-                lines.append(f"- [{f.stem.replace('-', ' ').title()}](sources/{f.name})")
-            lines.append("")
-
-    entities_dir = topic_dir / "entities"
-    if entities_dir.exists():
-        entity_files = sorted(entities_dir.glob("*.md"))
-        if entity_files:
-            lines.append("## Entities")
-            lines.append("")
-            for f in entity_files:
-                lines.append(f"- [{f.stem}](entities/{f.name})")
-            lines.append("")
-
-    lines.append("---")
-    lines.append("*This file is maintained automatically. Do not edit manually.*")
-
-    (topic_dir / "index.md").write_text("\n".join(lines))
-
-
-def build_global_index() -> list[str]:
-    """重建所有 Topic 的 index.md"""
-    topics = []
-    for d in sorted(BASE.iterdir()):
-        if not d.is_dir() or d.name.startswith(".") or d.name in ("concepts", "entities"):
+    tag_map = defaultdict(list)
+    for f in sorted(wiki_dir.glob("*.md")):
+        if f.name.startswith("_"):
             continue
-        if not (d / "records.json").exists():
-            continue
-        build_topic_index(d.name)
-        topics.append(d.name)
-    return topics
+        content = f.read_text()
+        for line in content.splitlines():
+            if line.startswith("**Key topics:**"):
+                topics_str = line.replace("**Key topics:**", "").strip()
+                for t in topics_str.split(","):
+                    t = t.strip()
+                    if t and t != "—":
+                        tag_map[t].append(f.name)
 
+    lines = [f"# {topic} — Tag Index", "", f"**Updated:** {datetime.now().strftime('%Y-%m-%d')}", "", "---", ""]
+    for tag in sorted(tag_map):
+        lines.append(f"### #{tag}")
+        for fname in tag_map[tag]:
+            lines.append(f"- [{fname.replace('.md', '')}]({fname})")
+        lines.append("")
+
+    (wiki_dir / "_tags.md").write_text("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Status
+# ---------------------------------------------------------------------------
 
 def show_status():
-    """顯示系統現有狀態"""
     print("=== 知識庫系統狀態 ===\n")
 
-    print("Raw 層（records.json）：")
+    print("System A（records.json）：")
     for d in sorted(BASE.iterdir()):
-        if not d.is_dir() or d.name.startswith(".") or d.name in ("concepts", "entities"):
+        if not d.is_dir() or d.name.startswith(".") or d.name == "wiki":
             continue
         rec_path = d / "records.json"
-        if rec_path.exists():
-            with open(rec_path) as f:
-                records = json.load(f)
-                count = len(records) if isinstance(records, list) else 0
-            print(f"  {d.name}: {count:,} 筆記錄")
-
-    print("\nWiki 層（*.md）：")
-    for d in sorted(BASE.iterdir()):
-        if not d.is_dir() or d.name.startswith(".") or d.name in ("concepts", "entities"):
+        if not rec_path.exists():
             continue
-        if not (d / "records.json").exists():
-            continue
-        sources_count = len(list((d / "sources").glob("*.md"))) if (d / "sources").exists() else 0
-        entities_count = len(list((d / "entities").glob("*.md"))) if (d / "entities").exists() else 0
-        has_index = (d / "index.md").exists()
-        has_summary = (d / "_summary.md").exists()
-        print(f"  {d.name}: {sources_count} sources, {entities_count} entities"
-              f"{' [index ✓]' if has_index else ''}{' [summary ✓]' if has_summary else ''}")
+        records = json.loads(rec_path.read_text())
+        total = len(records)
+        promoted = sum(1 for r in records if r.get("metadata", {}).get("promoted_to_wiki"))
+        eligible = len(eligible_groups(group_by_doc_name(records)))
+        print(f"  {d.name}: {total:,} records | {promoted} promoted | {eligible} eligible")
 
-    print("\n頂層 Wiki（跨 Topic）：")
-    concepts_count = len(list(CONCEPTS_DIR.glob("*.md"))) if CONCEPTS_DIR.exists() else 0
-    entities_count = len(list(ENTITIES_DIR.glob("*.md"))) if ENTITIES_DIR.exists() else 0
-    print(f"  concepts/: {concepts_count} 頁")
-    print(f"  entities/: {entities_count} 頁")
+    print(f"\nSystem B（wiki/）：")
+    if not WIKI_BASE.exists():
+        print("  （尚未建立）")
+    else:
+        for d in sorted(WIKI_BASE.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            pages = len([f for f in d.glob("*.md") if not f.name.startswith("_")])
+            print(f"  {d.name}: {pages} routing pages")
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Migration Helper: Vector DB → Markdown Wiki")
-    parser.add_argument("--topic", type=str, help="要遷移的 Topic 名稱")
-    parser.add_argument("--dry-run", action="store_true", help="預覽模式，不寫入檔案")
-    parser.add_argument("--list-topics", action="store_true", help="列出所有可用 Topic")
+    parser = argparse.ArgumentParser(description="Migration Helper: System A → System B routing index")
+    parser.add_argument("--promote", metavar="TOPIC", help="升級指定 Topic")
+    parser.add_argument("--promote-all", action="store_true", help="升級所有 Topic")
+    parser.add_argument("--dry-run", action="store_true", help="預覽模式，不寫入")
     parser.add_argument("--status", action="store_true", help="顯示系統狀態")
-    parser.add_argument("--rebuild-index", action="store_true", help="重建所有 Topic 的 index.md")
+    parser.add_argument("--list-topics", action="store_true", help="列出可用 Topic")
+    parser.add_argument("--model", default=SYNTHESIS_MODEL, help=f"合成模型（預設 {SYNTHESIS_MODEL}）")
     args = parser.parse_args()
 
     if args.status:
@@ -263,24 +305,29 @@ def main():
         return
 
     if args.list_topics:
-        print("可用 Topic（有 records.json 的目錄）：")
+        print("可用 Topic：")
         for d in sorted(BASE.iterdir()):
-            if d.is_dir() and not d.name.startswith(".") and (d / "records.json").exists():
+            if d.is_dir() and not d.name.startswith(".") and d.name != "wiki" and (d / "records.json").exists():
                 print(f"  - {d.name}")
         return
 
-    if args.rebuild_index:
-        topics = build_global_index()
-        print(f"✅ 已重建 {len(topics)} 個 Topic 的 index.md")
+    if args.promote_all:
+        topics = [d.name for d in sorted(BASE.iterdir())
+                  if d.is_dir() and not d.name.startswith(".") and d.name != "wiki"
+                  and (d / "records.json").exists()]
+        total = 0
+        for topic in topics:
+            print(f"\n[{topic}]")
+            n = promote_topic(topic, dry_run=args.dry_run, model=args.model)
+            total += n
+        print(f"\n完成：共升級 {total} 份文件")
         return
 
-    if args.topic:
-        topic = args.topic
-        print(f"{'[預覽] ' if args.dry_run else ''}正在遷移 Topic：{topic}")
-        records = load_records(topic)
-        print(f"  載入 {len(records)} 筆記錄")
-        written = write_wiki_topic(topic, records, dry_run=args.dry_run)
-        print(f"  {'預覽' if args.dry_run else '寫入'}完成：{written} 個來源頁")
+    if args.promote:
+        topic = args.promote
+        print(f"{'[預覽] ' if args.dry_run else ''}升級 Topic：{topic}")
+        n = promote_topic(topic, dry_run=args.dry_run, model=args.model)
+        print(f"完成：{'預覽' if args.dry_run else '升級'} {n} 份文件")
         return
 
     parser.print_help()

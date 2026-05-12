@@ -1,23 +1,17 @@
 ---
-title: "Page Title"
-type: entity | concept
-sources: []
-last_confirmed: YYYY-MM-DD
-confidence: low | medium | high
-supersedes: []
-superseded_by: ""
+title: "Document Title"
+topic: TopicName
+system_a_ids:
+  - 550e8400-e29b-41d4-a716-446655440000
+promoted_at: YYYY-MM-DD
 status: active
 ---
 
-# Page Title
+# Document Title
 
-Write the content here. No length limit — include everything relevant.
+2–3 sentence description of what this document covers and why it matters. Be explicit — optimize for LLM discoverability, not human reading style.
 
-Key points:
-- Optimize for LLM reading: be explicit, avoid ambiguous pronouns
-- Include definitions for domain-specific terms
-- Link related concepts by name using `[[wikilink]]` syntax
+**Key topics:** topic1, topic2, topic3
 
-## Section (optional)
-
-Add sections if the article is long enough to warrant navigation.
+---
+*Routing index — full content available in System A*
