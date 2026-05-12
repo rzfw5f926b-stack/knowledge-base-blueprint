@@ -1,29 +1,35 @@
 # Dual Knowledge Base System — Architecture
 
-## Core Concepts
+## System Design
 
-### Storage Layer vs Retrieval Layer
-
-| Dimension | Option A | Option B |
-|-----------|----------|----------|
-| **Storage** | Raw (`records.json`) | Wiki (`wiki/{Topic}/*.md`) |
-| **Retrieval** | System A (vector search) | System B (direct read / grep) |
-
-System A runs entirely on Raw. System B is a derived routing layer — it does not replace System A.
-
-### Data Flow
+This is a **single-pipeline architecture**, not two parallel systems.
 
 ```
-New document
+All knowledge
      │
      ▼
-records.json            ← immutable, source of truth
+records.json                ← single entry point, immutable source of truth
      │
-     │  every query → hit_count + 1
+     ├── System A reads here for semantic search (vector similarity)
      │
      └── hit_count >= 3 ──► wiki/{Topic}/<slug>.md
-                             (routing index, LLM-synthesized)
+                              ↑
+                        System B reads here for fast lookup
+                        (routing index only — points back to records.json)
 ```
+
+**There is no choice of where to store.** All data enters via `records.json`. The wiki is a derived output — promoted automatically when a document is queried enough times.
+
+**The two "systems" are retrieval strategies, not storage alternatives:**
+
+| | System A | System B |
+|-|----------|----------|
+| **Reads from** | `records.json` (raw) | `wiki/{Topic}/*.md` (derived) |
+| **How** | cosine similarity on embeddings | direct file read / grep |
+| **When to use** | exploratory / semantic queries | exact name / known document |
+| **Cost** | embedding computation required | zero embedding cost |
+
+
 
 ---
 
