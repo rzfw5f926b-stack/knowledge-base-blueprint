@@ -1,21 +1,17 @@
 ---
-title: "Article Title"
+title: "Document Title"
 topic: TopicName
-type: article        # article | procedure | decision | reference
-tags: []             # e.g. [finance, etf, passive-investing]
-source: "https://example.com/article"
-created: YYYY-MM-DD
+system_a_ids:
+  - 550e8400-e29b-41d4-a716-446655440000
+promoted_at: YYYY-MM-DD
+status: active
 ---
 
-# Article Title
+# Document Title
 
-Write the article content here. No length limit — include everything relevant.
+2–3 sentence description of what this document covers and why it matters. Be explicit — optimize for LLM discoverability, not human reading style.
 
-Key points:
-- Optimize for LLM reading: be explicit, avoid ambiguous pronouns
-- Include definitions for domain-specific terms
-- Link related concepts by name (the agent can search for them)
+**Key topics:** topic1, topic2, topic3
 
-## Section (optional)
-
-Add sections if the article is long enough to warrant navigation.
+---
+*Routing index — full content available in System A*

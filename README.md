@@ -1,46 +1,55 @@
 # Dual Knowledge Base System Blueprint
 
 A self-contained blueprint for building an AI-powered dual knowledge base:
-- **System A** — Vector DB, source of truth
-- **System B** — routing / index layer, derived from A
+- **System A** — Vector DB for semantic search (embedding-based)
+- **System B** — Markdown Wiki for structured, human-readable knowledge
 
 Any AI agent can read this repo and build the same system from scratch.
 
 ---
 
-## Why a Dual System?
+## Core Idea
+
+All knowledge enters through a single raw layer (`records.json`). The wiki is a **derived output** — crystallized from raw by an LLM agent. This separation means:
+
+- Wiki can always be rebuilt from raw (contamination is recoverable)
+- Ingest is fast — no LLM needed at write time
+- Query routing and ingest routing are independent
 
 | Scenario | Route to |
 |----------|----------|
-| Bulk document ingestion (entire docs site, PDFs) | System A |
+| Bulk document ingestion (entire docs site, PDFs) | raw → System A |
 | Semantic similarity search ("find concepts related to X") | System A |
-| Precise keyword lookup, named concepts, routing | System B |
+| Precise keyword lookup, named concepts, notes | System B |
 | Exploratory / uncertain queries | Both |
-
-**System A** is the canonical archive.  
-**System B** helps the agent get back to the right A-records fast.
 
 ---
 
 ## Architecture
 
 ```
-New document arrives
-        │
-        ▼
-  Ingest / Classify
-        │
-        ▼
-System A
-Vector DB (source of truth)
-        │
-        └── promotion / synthesis ──► System B
-                                      Routing / Index Layer
+── INGEST ──────────────────────────────────────
+
+  New document ──► records.json   ← single entry point
+                       │
+                  hit_count >= 3
+                       │
+                       ▼
+                  wiki/{Topic}/   ← derived routing index
+                  <doc-slug>.md     (auto-promoted, points back to records.json)
+
+── QUERY ───────────────────────────────────────
+
+  Question
+      │
+      ├──► System B (wiki pages)  ── fast lookup, zero embedding cost
+      │         │ not found
+      │         ▼
+      └──► System A (records.json) ── vector search
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full decision tree and query routing strategy.
-
-See [SCHEMA.md](SCHEMA.md) for the authoritative record/file schema and promotion rules.
+See [SCHEMA.md](SCHEMA.md) for the agent behavior protocol (write permissions, frontmatter spec, lint checklist).
 
 ---
 
@@ -66,7 +75,6 @@ docker run -d --name tika -p 9998:9998 apache/tika:latest-full
 
 ```bash
 mkdir -p ~/.knowledge_base/MyTopic
-# records.json starts as an empty array: []
 echo "[]" > ~/.knowledge_base/MyTopic/records.json
 ```
 
@@ -75,14 +83,17 @@ See [system-a-vector-db/README.md](system-a-vector-db/README.md) for how to inge
 ### System B — Markdown Wiki
 
 ```bash
-mkdir -p ~/.knowledge_base/wiki/MyTopic
-touch ~/.knowledge_base/wiki/MyTopic/_summary.md
-touch ~/.knowledge_base/wiki/MyTopic/_tags.md
+mkdir -p ~/.knowledge_base/MyTopic/entities
+mkdir -p ~/.knowledge_base/MyTopic/sources
+touch ~/.knowledge_base/MyTopic/index.md
+touch ~/.knowledge_base/MyTopic/_summary.md   # fill this in yourself
+mkdir -p ~/.knowledge_base/concepts
+mkdir -p ~/.knowledge_base/entities
 ```
 
 See [system-b-wiki/README.md](system-b-wiki/README.md) for file format and naming conventions.
 
-### Promotion (A → B)
+### Migration (A → B)
 
 ```bash
 export KB_BASE=~/.knowledge_base
@@ -90,7 +101,46 @@ python3 tools/migration_helper.py --status          # view current state
 python3 tools/migration_helper.py --topic MyTopic   # migrate a topic to wiki
 ```
 
-Promotion is automatic in the final design when a record's `hit_count >= 3`.
+---
+
+## How to Query
+
+### System B — Direct wiki lookup
+
+Best for named concepts, definitions, and past decisions. Zero cost — no embedding needed.
+
+```bash
+# See what's in a topic
+cat ~/.knowledge_base/Finance/index.md
+
+# Read a specific wiki page directly
+cat ~/.knowledge_base/Finance/entities/SP500.md
+cat ~/.knowledge_base/concepts/RAG.md
+```
+
+### System A — Semantic search
+
+Best for fuzzy or exploratory queries where you can't name the exact concept.
+
+```python
+# Full implementation in system-a-vector-db/README.md
+results = search("Finance", "passive investing strategies", top_k=5)
+for r in results:
+    print(f"[{r['score']:.2f}] {r['metadata']['source']}")
+    print(r['content'][:300])
+```
+
+### Routing at a glance
+
+| Your question | Start with | Fallback |
+|---------------|-----------|---------|
+| "What is X?" / "Tell me about Y" | System B (wiki) | System A |
+| "How does X compare to Y?" | System A | — |
+| "Find anything about Z" | System A | widen to all topics |
+| A past decision or personal note | System B (wiki) | System A |
+| "What's the latest on X?" | Web search | ingest result into KB |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete decision algorithm.
 
 ---
 
@@ -109,7 +159,8 @@ Promotion is automatic in the final design when a record's `hit_count >= 3`.
 ```
 knowledge-base-blueprint/
 ├── README.md                        ← You are here
-├── ARCHITECTURE.md                  ← Full system design
+├── ARCHITECTURE.md                  ← Full system design and query routing
+├── SCHEMA.md                        ← Agent behavior protocol
 ├── system-a-vector-db/
 │   ├── README.md                    ← Setup, ingestion, query guide
 │   └── schema/
@@ -118,15 +169,14 @@ knowledge-base-blueprint/
 │   ├── README.md                    ← Wiki format and conventions
 │   └── template/
 │       ├── article_template.md
-│       ├── _summary_template.md
-│       └── _tags_template.md
+│       └── _summary_template.md
 └── tools/
     └── migration_helper.py          ← System A → B migration tool
 ```
 
 ---
 
-## Future Upgrade Path
+## Upgrade Path
 
 When System A grows beyond ~5,000 records, linear scan becomes slow. Upgrade to [sqlite-vec](https://github.com/asg017/sqlite-vec):
 

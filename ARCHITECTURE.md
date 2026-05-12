@@ -1,53 +1,79 @@
 # Dual Knowledge Base System — Architecture
 
-## System Overview
+## System Design
+
+This is a **single-pipeline architecture**, not two parallel systems.
 
 ```
-Knowledge Input
-       │
-       ▼
- Ingest / Classify
-       │
-       ▼
-System A
-Vector DB (source of truth)
-       │
-       └── promotion / synthesis ──► System B
-                                   Routing / Index Layer
+All knowledge
+     │
+     ▼
+records.json                ← single entry point, immutable source of truth
+     │
+     ├── System A reads here for semantic search (vector similarity)
+     │
+     └── hit_count >= 3 ──► wiki/{Topic}/<slug>.md
+                              ↑
+                        System B reads here for fast lookup
+                        (routing index only — points back to records.json)
 ```
+
+**There is no choice of where to store.** All data enters via `records.json`. The wiki is a derived output — promoted automatically when a document is queried enough times.
+
+**The two "systems" are retrieval strategies, not storage alternatives:**
+
+| | System A | System B |
+|-|----------|----------|
+| **Reads from** | `records.json` (raw) | `wiki/{Topic}/*.md` (derived) |
+| **How** | cosine similarity on embeddings | direct file read / grep |
+| **When to use** | exploratory / semantic queries | exact name / known document |
+| **Cost** | embedding computation required | zero embedding cost |
+
+
 
 ---
 
 ## System A: Vector Database
 
-**Location:** `$KB_BASE/{Topic}/records.json`  
-**Role:** source of truth / immutable archive  
-**Embedding model:** `nomic-embed-text-v2-moe:latest` (768 dimensions)  
-**Query method:** semantic similarity / vector search
+**Location:** `$KB_BASE/{Topic}/records.json`
+**Role:** immutable archive and semantic search layer
+**Embedding model:** `nomic-embed-text-v2-moe:latest` (768 dimensions)
+**Query method:** cosine similarity
 
 **Rules:**
-- all new knowledge lands here first
-- preserve provenance and traceability
-- never delete promoted records
-- track usage with `metadata.hit_count`
+- All new knowledge enters here first
+- Records are never deleted
+- `hit_count` is incremented on every query hit
+- Provenance is preserved via `id` (UUID) and `content_hash`
 
-**Record schema:** see `SCHEMA.md` and `system-a-vector-db/schema/record.example.json`
+**Record schema:** see `SCHEMA.md §4` and `system-a-vector-db/schema/record.example.json`
 
 ---
 
 ## System B: Routing / Index Layer
 
-**Location:** `$KB_BASE/wiki/{Topic}/*.md`  
-**Role:** fast routing, summaries, topic maps, and optional distilled synthesis  
-**Query method:** direct file read / grep / simple index lookup  
-**Maintained by:** AI agent
+**Location:** `$KB_BASE/wiki/{Topic}/*.md`
+**Role:** fast routing index for frequently-accessed documents
+**Query method:** direct file read / grep — zero embedding cost
+**Maintained by:** AI agent (auto-promoted from System A)
 
-**Rules:**
-- System B is derived from System A
-- System B may contain only pointers, summaries, and high-value synthesis
-- System B should stay lean and navigable
+**What a routing index page contains:**
+- 2–3 sentence description of the document
+- Key topics for discoverability
+- `system_a_ids` — UUIDs pointing back to the original System A records
 
-**File format:** see `SCHEMA.md` and `system-b-wiki/README.md`
+**What it does NOT contain:** full document content (always in System A)
+
+```
+$KB_BASE/
+├── {Topic}/
+│   └── records.json
+└── wiki/
+    └── {Topic}/
+        ├── _summary.md     ← human-authored
+        ├── _tags.md        ← agent-maintained
+        └── <doc-slug>.md   ← routing index (auto-promoted)
+```
 
 ---
 
@@ -56,18 +82,19 @@ Vector DB (source of truth)
 ```
 System A record queried
     │
-    ├─ hit_count < 3 → keep in A only
+    ├── hit_count < 3 → stays in A only
     │
-    └─ hit_count >= 3 → auto-promote to System B
+    └── hit_count >= 3 → promotion triggered
+            │
+            ├── find ALL chunks with same doc_name
+            ├── doc_name missing → skip
+            ├── feed all chunks to qwen3.5:9b
+            ├── synthesize routing index page
+            └── write to wiki/{Topic}/<slug>.md
+                mark all chunks: promoted_to_wiki = true
 ```
 
-**Promotion behavior:**
-- automatic
-- preserve System A record
-- write/update System B entry
-- mark metadata:
-  - `promoted_to_wiki = true`
-  - `promoted_at = YYYY-MM-DD`
+Promotion overwrites any existing wiki page for the same `doc_name`.
 
 ---
 
@@ -77,29 +104,31 @@ System A record queried
 
 | Signal | Route |
 |--------|-------|
-| Exact name / acronym / title | System B first |
-| Exploratory / semantic / comparison | System A first |
-| Ambiguous | Both |
-| Latest / recent / current event | Web search |
+| Exact name / known term | System B first |
+| Semantic / exploratory | System A first |
+| Comparison ("X vs Y") | System A |
+| "Latest" / "recent" | Web search |
 | Personal notes / decisions | System B first |
 
 ### Step 2 — Execute
 
 **System B first:**
-1. read `_summary.md` / `_tags.md`
-2. follow relevant links or pointers
-3. if insufficient, fall through to System A
+1. Scan `wiki/{Topic}/` for matching routing pages
+2. Found → read `system_a_ids`, fetch those records from System A for full content
+3. Not found → fall through to System A
 
-**System A first:**
-1. semantic search across the relevant topic
-2. take top results above threshold
-3. use them as source material for the answer
+**System A:**
+1. Embed query (`nomic-embed-text-v2-moe:latest`)
+2. Cosine similarity on `records.json`, threshold > 0.75
+3. Return top 3–5 results, increment `hit_count` on each
 
-### Step 3 — After answering
+### Step 3 — No results
 
-If the answer is stable and reusable:
-- keep it in System A
-- optionally auto-promote to System B when hit_count threshold is reached
+```
+System B: miss → fall through to System A
+System A: miss → widen to all topics
+          still miss → "Not found. Search web and add to KB?"
+```
 
 ---
 
@@ -107,17 +136,21 @@ If the answer is stable and reusable:
 
 | Frequency | Task |
 |-----------|------|
-| Every write | Update source metadata / hit counts |
-| On promotion | Write System B entry + update `_summary.md` / `_tags.md` |
-| Periodic | Lint for stale links, duplicates, orphan pages |
+| Every ingest | Append to `log.md` |
+| Every query | Increment `hit_count` on returned records |
+| On promotion | Write wiki page, mark records as promoted |
+| Weekly | Lint — orphan wiki pages, dead `system_a_ids`, stale entries |
+| Quarterly | Review `_summary.md` topic overviews |
 
 ---
 
-## Scaling
+## Scaling Path
 
 | Record Count | Recommendation |
 |-------------|---------------|
-| < 5,000 | full scan is fine |
-| 5,000–50,000 | add index / sqlite-vec |
-| > 50,000 | add reranker |
-| > 100,000 | move to dedicated vector service |
+| < 5,000 | NumPy full scan |
+| 5,000–50,000 | sqlite-vec with HNSW index |
+| > 50,000 | Add cross-encoder reranker (e.g. `ms-marco-MiniLM`): retrieve top-20, rerank to top-5 |
+| > 100,000 | Qdrant or similar dedicated vector DB |
+
+> When `hit_count` updates become a concurrency bottleneck (multiple agents writing simultaneously), migrate `records.json` to SQLite with file-level locking.
