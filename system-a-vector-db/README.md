@@ -1,6 +1,6 @@
 # System A: Vector Database
 
-Stores documents as text + 768-dimensional embeddings for semantic search.
+The source of truth for all knowledge. Stores documents as text + 768-dimensional embeddings for semantic search.
 
 ---
 
@@ -9,8 +9,7 @@ Stores documents as text + 768-dimensional embeddings for semantic search.
 ```
 $KB_BASE/
 └── {Topic}/
-    ├── records.json    ← all records for this topic
-    └── manifest.json   ← topic metadata (optional)
+    └── records.json    ← all records for this topic (append-only)
 ```
 
 ---
@@ -27,24 +26,26 @@ from datetime import datetime
 KB_BASE = Path(os.environ.get("KB_BASE", Path.home() / ".knowledge_base"))
 EMBED_MODEL = "nomic-embed-text-v2-moe:latest"
 
-def ingest(topic: str, text: str, source: str, doc_name: str, doc_type: str = "article", tags: list = []):
+def ingest(topic: str, text: str, source: str, title: str, tags: list = []):
     resp = ollama.embed(model=EMBED_MODEL, input=text)
     embedding = resp["embeddings"][0]
 
     record = {
-        "doc_id": hashlib.md5(text.encode()).hexdigest(),
-        "content": text,
+        "id": hashlib.md5(text.encode()).hexdigest(),
+        "text": text,
         "embedding": embedding,
         "metadata": {
             "source": source,
-            "doc_name": doc_name,
+            "title": title,
             "topic": topic,
-            "type": doc_type,        # "article" | "procedure" | "decision" | "reference"
-            "tags": tags,            # e.g. ["finance", "etf", "passive-investing"]
-            "indexed_at": datetime.now().isoformat(),
-            "model": EMBED_MODEL,
+            "char_count": len(text),
+            "created_at": datetime.now().isoformat(),
+            "hit_count": 0,
+            "promoted_to_wiki": False,
             "chunk_idx": 0,
             "total_chunks": 1,
+            "tags": tags,
+            "model": EMBED_MODEL,
         }
     }
 
@@ -80,7 +81,7 @@ def search(topic: str, query: str, top_k: int = 5) -> list[dict]:
     for r in records:
         vec = np.array(r["embedding"])
         score = float(np.dot(q_vec, vec) / (np.linalg.norm(q_vec) * np.linalg.norm(vec)))
-        results.append({"score": score, "content": r["content"], "metadata": r["metadata"]})
+        results.append({"score": score, "text": r["text"], "metadata": r["metadata"]})
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return [r for r in results if r["score"] > 0.75][:top_k]
@@ -103,14 +104,13 @@ def search_filtered(
     records = json.loads(records_path.read_text())
 
     # Pre-filter by metadata (cheap, no embedding needed)
-    if filter_type:
-        records = [r for r in records if r["metadata"].get("type") == filter_type]
+    # If you need typed routing, use tags or topic conventions in metadata.
     if filter_tags:
         records = [r for r in records
                    if any(t in r["metadata"].get("tags", []) for t in filter_tags)]
     if after_date:
         records = [r for r in records
-                   if r["metadata"].get("indexed_at", "") >= after_date]
+                   if r["metadata"].get("created_at", "") >= after_date]
 
     if not records:
         return []

@@ -1,8 +1,8 @@
-# System B: Markdown Wiki
+# System B: Routing / Index Layer
 
-A flat-file wiki maintained directly by an AI agent. No database, no indexing — just markdown files that both humans and LLMs can read.
+A flat-file layer derived from System A. It keeps short summaries, topic maps, pointers, and optional distilled synthesis so the agent can route back to the right A-records quickly.
 
-Inspired by [Andrej Karpathy's LLM Wiki approach](https://www.mindstudio.ai/blog/andrej-karpathy-llm-wiki-knowledge-base-claude-code): optimize for LLM reading, not human browsing.
+Inspired by [Andrej Karpathy's LLM Wiki approach](https://www.mindstudio.ai/blog/andrej-karpathy-llm-wiki-knowledge-base-claude-code), but adapted here as a lightweight routing layer rather than a second source of truth.
 
 ---
 
@@ -14,7 +14,7 @@ $KB_BASE/wiki/
 └── {Topic}/
     ├── _summary.md          ← topic summary + file list (AI-maintained)
     ├── _tags.md             ← tag index (AI-maintained)
-    └── article-slug.md      ← one article per concept
+    └── article-slug.md      ← optional distilled page / pointer / synthesis
 ```
 
 ---
@@ -28,22 +28,22 @@ $KB_BASE/wiki/
 
 ---
 
-## Article Format
+## File Format
 
 See [`template/article_template.md`](template/article_template.md).
 
-Every article starts with a metadata header:
+Every file starts with a small metadata header:
 
 ```markdown
-# Article Title
+# Title
 
 **Topic:** TopicName
-**Source:** https://example.com or "personal note"
+**Source:** System A record / source note
 **Created:** YYYY-MM-DD
 
 ---
 
-Article content here...
+Content here. Keep it short when the file is serving as an index/pointer; use longer synthesis only when it is genuinely useful.
 ```
 
 ---
@@ -66,11 +66,11 @@ python3 tools/migration_helper.py --rebuild-index
 
 ## Agent Instructions: How to Add a New Article
 
-1. Write the article content following the template format
+1. Write the file content following the template format
 2. Choose a descriptive filename (kebab-case, max 60 chars)
 3. Save to `$KB_BASE/wiki/{Topic}/{filename}.md`
 4. Update `_summary.md`: increment count, add link to new file
-5. Update `_tags.md` if the article has relevant tags
+5. Update `_tags.md` if the file has relevant tags
 6. If this is a new topic, update `_index.md` as well
 
 ---
@@ -79,7 +79,7 @@ python3 tools/migration_helper.py --rebuild-index
 
 | Use System B when... | Use System A when... |
 |---------------------|---------------------|
-| The concept has a clear name | You need fuzzy/semantic search |
-| Humans also need to read it | It's a bulk document dump |
-| It's a personal note or decision | You need cross-document similarity |
-| You want instant lookup (no embedding cost) | The content is long-tail / archival |
+| You need routing / topic mapping | You need fuzzy/semantic search |
+| You want a distilled pointer or synthesis | It's a bulk document dump |
+| You want to navigate back to the source quickly | You need cross-document similarity |
+| The item has hit the promotion threshold | The raw source must remain authoritative |
