@@ -1,6 +1,6 @@
 # System B: Routing / Index Layer
 
-A flat-file routing index automatically promoted from System A. No database, no manual curation — pages are synthesized by an LLM when a document's `hit_count` reaches the promotion threshold.
+A flat-file routing index automatically promoted from System A. No database, no manual curation — pages are synthesized by an LLM when a document's `hit_count` reaches the promotion threshold. Inspired by [Andrej Karpathy's LLM Wiki approach](https://www.mindstudio.ai/blog/andrej-karpathy-llm-wiki-knowledge-base-claude-code), adapted here as a lightweight routing layer rather than a second source of truth.
 
 **System B does not store full content.** It stores routing index pages that point back to System A record IDs. When an agent needs the full content, it fetches from System A using `system_a_ids`.
 
