@@ -39,6 +39,8 @@ Vector DB  Markdown Wiki
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full decision tree and query routing strategy.
 
+See [SCHEMA.md](SCHEMA.md) for the authoritative record/file schema and promotion rules.
+
 ---
 
 ## Prerequisites
