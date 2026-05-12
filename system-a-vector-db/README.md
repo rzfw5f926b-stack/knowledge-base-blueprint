@@ -30,17 +30,35 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text-v2-moe:latest")
 EMBED_DIM = 768
 
 def normalize(text: str) -> str:
-    return " ".join(text.lower().split())
+    """Canonical normalization for content_hash — must match SCHEMA.md spec exactly."""
+    text = re.sub(r'<[^>]+>', '', text)  # 1. strip HTML tags
+    text = text.lower()                   # 2. lowercase
+    text = re.sub(r'\s+', ' ', text)     # 3. collapse whitespace
+    return text.strip()                   # 4. strip edges
+
+def derive_doc_name(source_locator: str) -> str:
+    """Fallback: derive doc_name from source_locator when not explicitly provided."""
+    from urllib.parse import urlparse
+    path = urlparse(source_locator).path if source_locator.startswith("http") else source_locator
+    name = path.rstrip("/").split("/")[-1]
+    name = re.sub(r'\.(txt|md|html?|pdf|docx)$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'[^\w-]', '-', name).strip('-')[:60]
+    if not name:
+        raise ValueError(f"Cannot derive doc_name from: {source_locator}")
+    return name
 
 def ingest(
     topic: str,
     text: str,
-    doc_name: str,
     source_locator: str,
+    doc_name: str = "",         # required — derived from source_locator if empty
     source_type: str = "url",   # "url" | "file" | "note"
     chunk_idx: int = 0,
     total_chunks: int = 1,
 ):
+    if not doc_name:
+        doc_name = derive_doc_name(source_locator)
+
     content_hash = hashlib.sha256(normalize(text).encode()).hexdigest()
 
     # Skip duplicate content

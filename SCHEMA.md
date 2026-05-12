@@ -126,18 +126,55 @@ Every record in `records.json` must follow this shape:
 | Field | Type | Purpose |
 |-------|------|---------|
 | `id` | UUID v4 | Stable unique identifier. Never changes even if content is updated. |
-| `content_hash` | sha256 | Hash of normalized text. Used for deduplication and change detection. |
+| `content_hash` | sha256 | Hash of normalized text. Used for deduplication and change detection. See normalization rules below. |
 | `text` | string | Full chunk text. No truncation. |
 | `embedding` | float[] | 768-dim vector. Tied to `embedding_model`. |
 | `source_type` | enum | Origin of the content: `url`, `file`, `note` |
 | `source_locator` | string | Re-fetchable location (URL or absolute file path) |
 | `source_fetched_at` | ISO 8601 | When the source was retrieved |
-| `doc_name` | string | Groups chunks from the same document. Used for promotion grouping. |
-| `hit_count` | int | Number of times this record was returned in a query. Incremented by search functions. |
+| `doc_name` | string | **Required.** Groups chunks from the same document. Must be set at ingest — records without `doc_name` cannot be promoted. Derive from `source_locator` if not explicitly provided (see below). |
+| `hit_count` | int | Number of times this record was returned in a query. Incremented by search functions. Triggers wiki promotion at >= 3. |
 | `promoted_to_wiki` | bool | Whether this record's doc has a wiki routing page. |
 | `promoted_at` | date or null | Date of wiki promotion. |
 | `embedding_model` | string | Model used to generate the embedding. |
 | `embedding_dim` | int | Embedding dimensions. Required for version compatibility checks. |
+
+### `content_hash` Normalization Rules
+
+All ingest scripts **must** apply these steps in order before hashing. Any deviation produces a different hash for the same content, silently breaking deduplication.
+
+```python
+import re, hashlib
+
+def normalize(text: str) -> str:
+    text = re.sub(r'<[^>]+>', '', text)  # 1. strip HTML tags
+    text = text.lower()                   # 2. lowercase
+    text = re.sub(r'\s+', ' ', text)     # 3. collapse all whitespace to single space
+    return text.strip()                   # 4. strip leading/trailing whitespace
+
+content_hash = hashlib.sha256(normalize(text).encode()).hexdigest()
+```
+
+### `doc_name` Rules
+
+- **Required at ingest.** Do not ingest without setting `doc_name`.
+- Format: kebab-case, max 60 characters — e.g. `vanguard-etf-guide`
+- All chunks from the same source document must share the same `doc_name`
+- If not explicitly provided, derive it from `source_locator`:
+
+```python
+import re
+from urllib.parse import urlparse
+
+def derive_doc_name(source_locator: str) -> str:
+    path = urlparse(source_locator).path if source_locator.startswith("http") else source_locator
+    name = path.rstrip("/").split("/")[-1]
+    name = re.sub(r'\.(txt|md|html?|pdf|docx)$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'[^\w-]', '-', name).strip('-')[:60]
+    if not name:
+        raise ValueError(f"Cannot derive doc_name from: {source_locator}")
+    return name
+```
 
 ---
 
