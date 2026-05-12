@@ -53,6 +53,15 @@ def save_records(topic: str, records: list[dict]):
         json.dump(records, f, ensure_ascii=False, indent=2)
 
 
+def append_log(action: str, detail: str):
+    """Append one line to $KB_BASE/log.md in the standard format."""
+    log_path = BASE / "log.md"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    line = f"## [{timestamp}] {action} | {detail}\n"
+    with open(log_path, "a") as f:
+        f.write(line)
+
+
 # ---------------------------------------------------------------------------
 # Grouping
 # ---------------------------------------------------------------------------
@@ -218,6 +227,7 @@ def promote_topic(topic: str, dry_run: bool = False, model: str = SYNTHESIS_MODE
     if not dry_run and promoted > 0:
         save_records(topic, records)
         rebuild_tags(topic)
+        append_log("promote", f"{topic} | {promoted} docs → wiki")
 
     return promoted
 

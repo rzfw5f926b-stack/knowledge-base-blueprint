@@ -59,11 +59,13 @@ records.json        ← immutable archive, source of truth
 
 | Resource | Writers | Restriction |
 |----------|---------|-------------|
-| `records.json` | ingestion script | all agents read-only after write |
+| `records.json` | ingest script, search script, promote script | all other agents read-only |
 | `wiki/{Topic}/*.md` | primary agent, sub-agents, Claude Code | read-only agents cannot write |
 | `log.md` | all agents | append only — existing lines must not be modified |
 | `SCHEMA.md` | human owner | no agent may modify |
 | `_summary.md` | human owner | LLM must not overwrite |
+
+> **Single-writer assumption**: `records.json` is a flat JSON file with no locking. Only one script should write to it at a time. Concurrent writes (e.g. two simultaneous queries both incrementing `hit_count`) will overwrite each other. If you run multiple agents in parallel, add a file lock (`fcntl.flock`) around every read-modify-write cycle, or migrate to SQLite (see §9).
 
 ---
 

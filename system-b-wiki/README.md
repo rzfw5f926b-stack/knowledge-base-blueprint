@@ -83,14 +83,20 @@ Routing pages are created automatically by `tools/migration_helper.py --promote`
 When System B returns a match:
 
 ```python
-import json, yaml
+import json
 from pathlib import Path
 
 wiki_page = Path("~/.knowledge_base/wiki/Finance/vanguard-etf-guide.md").read_text()
 
-# Parse frontmatter
-frontmatter = yaml.safe_load(wiki_page.split("---")[1])
-system_a_ids = frontmatter["system_a_ids"]
+# Parse system_a_ids from frontmatter (no external dependencies)
+system_a_ids = []
+in_frontmatter = False
+for line in wiki_page.splitlines():
+    if line.strip() == "---":
+        in_frontmatter = not in_frontmatter
+        continue
+    if in_frontmatter and line.strip().startswith("- "):
+        system_a_ids.append(line.strip()[2:])
 
 # Fetch full content from System A
 records = json.loads(Path("~/.knowledge_base/Finance/records.json").read_text())
