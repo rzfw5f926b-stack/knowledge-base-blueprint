@@ -28,20 +28,24 @@ All knowledge enters through a single raw layer (`records.json`). The wiki is a 
 ## Architecture
 
 ```
-New document arrives
-        │
-        ▼
-  records.json          ← always (no routing at ingest)
-  (raw layer)
-        │
-        ▼ (periodic crystallization)
-    wiki pages
-        │
-   ┌────┴────┐
-   │         │
-System A  System B
-Vector DB  Markdown Wiki
-(raw)      (crystallized)
+── INGEST ──────────────────────────────────────
+
+  New document ──► records.json   ← single entry point
+                       │
+                  hit_count >= 3
+                       │
+                       ▼
+                  wiki/{Topic}/   ← derived routing index
+                  <doc-slug>.md     (auto-promoted, points back to records.json)
+
+── QUERY ───────────────────────────────────────
+
+  Question
+      │
+      ├──► System B (wiki pages)  ── fast lookup, zero embedding cost
+      │         │ not found
+      │         ▼
+      └──► System A (records.json) ── vector search
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full decision tree and query routing strategy.
